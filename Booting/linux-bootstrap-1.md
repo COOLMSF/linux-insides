@@ -85,6 +85,8 @@ _start:
     ...
 ```
 
+If we use qemu(qemu-system-i386 -kernel arch/x86/boot/bzImage -initrd ramdisk.img -append "console=ttyS0" -m 100 -S -s) to start the linux kernel, it will be [seabios](https://github.com/coreboot/seabios.git), for debugging seabios see [this page](https://www.yuque.com/coolder/linux/rwh45c).
+
 Here we can see the `jmp` instruction [opcode](http://ref.x86asm.net/coder32.html#xE9), which is `0xe9`, and its destination address at `_start16bit - ( . + 2)`.
 
 We also see that the `reset` section is `16` bytes and is compiled to start from the address `0xfffffff0` (`src/cpu/x86/16bit/reset16.ld`):
@@ -266,6 +268,17 @@ SECTIONS
   _text = .;
   _stext = .;
 ....
+```
+
+Entry of Linux kernel is phys_startup_$*(bits), where located at startup_32 - LOAD_OFFSET, which is 0x1000000
+```
+➜  arch grep -r "phys_startup" *
+x86/kernel/vmlinux.lds.S:ENTRY(phys_startup_32)
+x86/kernel/vmlinux.lds.S:ENTRY(phys_startup_64)
+x86/kernel/vmlinux.lds.S:        phys_startup_32 = startup_32 - LOAD_OFFSET;
+x86/kernel/vmlinux.lds.S:        phys_startup_64 = startup_64 - LOAD_OFFSET;
+x86/kernel/vmlinux.lds:ENTRY(phys_startup_32)
+	x86/kernel/vmlinux.lds:        phys_startup_32 = startup_32 - 0xC0000000;
 ```
 
 ```
