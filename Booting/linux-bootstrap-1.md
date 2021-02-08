@@ -85,6 +85,192 @@ _start:
     ...
 ```
 
++ This is not my case, I'm using qemu, the BIOS is [seabios](https://www.seabios.org/SeaBIOS) not coreboot, the boot code is different.
++ 
++ We clone this repo and make it. We fill find this,
++ 
++ ```
++ ➜  seabios git:(ef88eea) ✗ grep "reset_vector" * -r
++ out/romlayout32flat.lds:reset_vector = 0xffff0 ;
++ out/romlayout32flat.lds:ENTRY(reset_vector)
++ Binary file out/ccode16.o matches
++ Binary file out/romlayout.o matches
++ Binary file out/rom16.o matches
++ Binary file rom16offset.o matches
++ scripts/layoutrom.py:        entrysym = symbols['16'].get('reset_vector')
++ Binary file scripts/__pycache__/layoutrom.cpython-39.pyc matches
++ src/stacks.c:    extern void reset_vector(void) __noreturn;
++ src/stacks.c:        call16(0, 0, reset_vector);
++ src/stacks.c:    reset_vector();
++ src/romlayout.S:        .global reset_vector
++ src/romlayout.S:reset_vector:
++ ➜  seabios git:(ef88eea) ✗ 
++ ```
++ 
++ which shows reset_vector is in src/romlayout.S the entry located at 0xffff0 that is 0xfffffff0, as we expected, where the first instruction that CPU executed.
++ 
++ Let's check out reset_vector,
++ 
++ ```
++ ➜  seabios git:(ef88eea) ✗ cat src/romlayout.S | grep -A 10 reset_vector
++         .global reset_vector
++ reset_vector:
++         ljmpw $SEG_BIOS, $entry_post
++ 
++         // 0xfff5 - BiosDate in misc.c
++ 
++         // 0xfffe - BiosModelId in misc.c
++ 
++         // 0xffff - BiosChecksum in misc.c
++ 
++         .end
++ ```
++ 
++ reset_vector just jump to entry_post, and other memory is hard coded to be some value which in misc.c,
++ 
++ ```
++ // BIOS build date
++ char BiosDate[] VARFSEGFIXED(0xfff5) = "06/23/99";
++ 
++ u8 BiosModelId VARFSEGFIXED(0xfffe) = BUILD_MODEL_ID;
++ 
++ u8 BiosChecksum VARFSEGFIXED(0xffff);
++ ```
++ 
++ To verify this, just print hex value in gdb which connected to qemu,
++ 
++ ```
++ >>> x/10i 0xfffffff0
++    0xfffffff0:  jmp    0xf000:0xe05b
++    0xfffffff5:  xor    BYTE PTR ds:0x322f,dh
++    0xfffffff9:  xor    bp,WORD PTR [bx]
++    0xfffffffb:  cmp    WORD PTR [bx+di],di
++    0xfffffffd:  add    ah,bh
++    0xffffffff:  add    BYTE PTR [bx+si],al
++    0x1: add    BYTE PTR [bx+si],al
++    0x3: add    BYTE PTR [bx+si],al
++    0x5: add    BYTE PTR [bx+si],al
++    0x7: add    BYTE PTR [bx+si],al
++ >>> x/10x 0xfffffff0
++ 0xfffffff0:     0x00e05bea      0x2f3630f0      0x392f3332      0x00fc0039
++ 0x0:    0x00000000      0x00000000      0x00000000      0x00000000
++ 0x10:   0x00000000      0x00000000
++ >>> 
++ ```
++ 
++ Biosdate is different here, maybe version is not matching.
++ 
++ On emulators, this phase starts when the CPU starts execution in 16bit mode at 0xFFFF0000:FFF0. The emulators map the SeaBIOS binary to this address, and SeaBIOS arranges for romlayout.S:reset_vector() to be present there. This code calls romlayout.S:entry_post() which then calls post.c:handle_post() in 32bit mode [site](https://www.seabios.org/Execution_and_code_flow#SeaBIOS_code_phases).
++ 
++ handle_post in post.c
++ ```
++ // Entry point for Power On Self Test (POST) - the BIOS initilization
++ // phase.  This function makes the memory at 0xc0000-0xfffff
++ // read/writable and then calls dopost().
++ void VISIBLE32FLAT
++ handle_post(void)
++ {
++     if (!CONFIG_QEMU && !CONFIG_COREBOOT)
++         return;
++ 
++     serial_debug_preinit();
++     debug_banner();
++ 
++     // Check if we are running under Xen.
++     xen_preinit();
++ 
++     // Allow writes to modify bios area (0xf0000)
++     make_bios_writable();
++ 
++     // Now that memory is read/writable - start post process.
++     dopost();
++ }
++ ```
++ 
++ dopost in post.c
++ 
++ ```
++ // Setup for code relocation and then relocate.
++ void VISIBLE32INIT
++ dopost(void)
++ {
++     code_mutable_preinit();
++ 
++     // Detect ram and setup internal malloc.
++     qemu_preinit();
++     coreboot_preinit();
++     malloc_preinit();
++ 
++     // Relocate initialization code and call maininit().
++     reloc_preinit(maininit, NULL);
++ }
++ ```
++ 
++ maininit in post.c
++ 
++ ```
++ // Main setup code.
++ static void
++ maininit(void)
++ {
++     // Initialize internal interfaces.
++     interface_init();
++ 
++     // Setup platform devices.
++     platform_hardware_setup();
++ 
++     // Start hardware initialization (if threads allowed during optionroms)
++     if (threads_during_optionroms())
++         device_hardware_setup();
++ 
++     // Run vga option rom
++     vgarom_setup();
++     sercon_setup();
++     enable_vga_console();
++ 
++     // Do hardware initialization (if running synchronously)}
++     if (!threads_during_optionroms()) {
++         device_hardware_setup();
++         wait_threads();
++     }
++ 
++     // Run option roms
++     optionrom_setup();
++ 
++     // Allow user to modify overall boot order.
++     interactive_bootmenu();
++     wait_threads();
++ 
++     // Prepare for boot.
++     prepareboot();
++ 
++     // Write protect bios memory.
++     make_bios_readonly();
++ 
++     // Invoke int 19 to start boot process.
++     startBoot();
++ }
++ ```
++ 
++ startBoot in post.c
++ 
++ ```
++ void VISIBLE32FLAT
++ startBoot(void)
++ {
++     // Clear low-memory allocations (required by PMM spec).
++     memset((void*)BUILD_STACK_ADDR, 0, BUILD_EBDA_MINIMUM - BUILD_STACK_ADDR);
++ 
++     dprintf(3, "Jump to int19\n");
++     struct bregs br;
++     memset(&br, 0, sizeof(br));
++     br.flags = F_IF;
++     call16_int(0x19, &br);
++ }
++ ```
++ 
++ which call bootloader, see https://stackoverflow.com/questions/15627668/why-does-the-bios-int-0x19-load-bootloader-at-0x7c00.
+
 If we use qemu(qemu-system-i386 -kernel arch/x86/boot/bzImage -initrd ramdisk.img -append "console=ttyS0" -m 100 -S -s) to start the linux kernel, it will be [seabios](https://github.com/coreboot/seabios.git), for debugging seabios see [this page](https://www.yuque.com/coolder/linux/rwh45c).
 
 Here we can see the `jmp` instruction [opcode](http://ref.x86asm.net/coder32.html#xE9), which is `0xe9`, and its destination address at `_start16bit - ( . + 2)`.
@@ -271,6 +457,8 @@ SECTIONS
 ```
 
 Entry of Linux kernel is phys_startup_$*(bits), where located at startup_32 - LOAD_OFFSET, which is 0x1000000
+
+The startup function for the kernel (also called the swapper or process 0) establishes memory management (paging tables and memory paging), detects the type of CPU and any additional functionality such as floating point capabilities, and then switches to non-architecture specific Linux kernel functionality via a call to start_kernel().[5]
 ```
 ➜  arch grep -r "phys_startup" *
 x86/kernel/vmlinux.lds.S:ENTRY(phys_startup_32)
