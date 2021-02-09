@@ -85,9 +85,9 @@ _start:
     ...
 ```
 ---
-This is my case, I'm using qemu, the BIOS is [seabios](https://www.seabios.org/SeaBIOS) not coreboot, the boot code is different.
+This is my case, I'm using qemu, the BIOS is [seabios](https://www.seabios.org/SeaBIOS) (what's the relationship between seabios and coreboot?).
 
-We clone this repo and make it. We fill find this,
+We clone seabios' repo and make it. We fill find this,
 
 ```
 ➜  seabios git:(ef88eea) ✗ grep "reset_vector" * -r
@@ -107,7 +107,9 @@ src/romlayout.S:reset_vector:
 ➜  seabios git:(ef88eea) ✗ 
 ```
 
-which shows reset_vector is in src/romlayout.S the entry located at 0xffff0 that is 0xfffffff0, as we expected, where the first instruction that CPU executed.
+which shows reset_vector is in src/romlayout.S, the entry is located at 0xffff0 that is 0xfffffff0, as we expected, where the first instruction that CPU executed.
+
+On emulators, this phase starts when the CPU starts execution in 16bit mode at 0xFFFF0000:FFF0. The emulators map the SeaBIOS binary to this address, and SeaBIOS arranges for romlayout.S:reset_vector() to be present there. This code calls romlayout.S:entry_post() which then calls post.c:handle_post() in 32bit mode.
 
 Let's check out reset_vector,
 
@@ -126,7 +128,7 @@ reset_vector:
         .end
 ```
  
-reset_vector just jump to entry_post, and other memory is hard coded to be some value which in misc.c,
+reset_vector just jump to entry_post, and other memory is hard coded to be some values which are in misc.c,
  
 ```
 // BIOS build date
@@ -137,7 +139,9 @@ u8 BiosModelId VARFSEGFIXED(0xfffe) = BUILD_MODEL_ID;
 u8 BiosChecksum VARFSEGFIXED(0xffff);
 ```
 
-To verify this, just print hex value in gdb which connected to qemu,
+Biosdate is different here, maybe this is because version is not matching.
+
+To verify this, just print hex value in gdb which connected to qemu, [how to use qemu to debug kernel](http://nickdesaulniers.github.io/blog/2018/10/24/booting-a-custom-linux-kernel-in-qemu-and-debugging-it-with-gdb/),
 
 ```
 >>> x/10i 0xfffffff0
@@ -158,9 +162,93 @@ To verify this, just print hex value in gdb which connected to qemu,
 >>> 
 ```
 
-Biosdate is different here, maybe version is not matching.
+Let's check entry_post in romlayout.S,
 
-On emulators, this phase starts when the CPU starts execution in 16bit mode at 0xFFFF0000:FFF0. The emulators map the SeaBIOS binary to this address, and SeaBIOS arranges for romlayout.S:reset_vector() to be present there. This code calls romlayout.S:entry_post() which then calls post.c:handle_post() in 32bit mode [site](https://www.seabios.org/Execution_and_code_flow#SeaBIOS_code_phases).
+```
+entry_post:
+        cmpl $0, %cs:HaveRunPost                // Check for resume/reboot
+        jnz entry_resume
+        ENTRY_INTO32 _cfunc32flat_handle_post   // Normal entry point
+```
+
+We can see, entry_post check whether ever run POST, if so, no need to run post again and jump to entry_resume, else do this code,
+
+```
+        ENTRY_INTO32 _cfunc32flat_handle_post   // Normal entry point
+```
+
+where ENTRY_INTO32 is a macro, let's find it,
+
+```
+➜  src git:(ef88eea) ✗ grep "ENTRY_INTO32" -r *
+entryfuncs.S:        .macro ENTRY_INTO32 cfunc
+romlayout.S:        ENTRY_INTO32 _cfunc32flat_handle_csm
+romlayout.S:        ENTRY_INTO32 _cfunc32flat_handle_19
+romlayout.S:        ENTRY_INTO32 _cfunc32flat_handle_18
+romlayout.S:        ENTRY_INTO32 _cfunc32flat_handle_post   // Normal entry point
+```
+
+grep shows it's in entryfuncs.S, defined as a macro followed by a C function, let's have a look,
+
+```
+        // Reset stack, transition to 32bit mode, and call a C function.
+        .macro ENTRY_INTO32 cfunc
+        xorw %dx, %dx
+        movw %dx, %ss
+        movl $ BUILD_STACK_ADDR , %esp
+        movl $ \cfunc , %edx
+        jmp transition32
+        .endm
+```
+
+this function load the start address of the C function into edx and jump to transition32(romlayout.S),
+
+```
+transition32:
+        // Disable irqs (and clear direction flag)
+        cli
+        cld
+
+        // Disable nmi
+        movl %eax, %ecx
+        movl $CMOS_RESET_CODE|NMI_DISABLE_BIT, %eax
+        outb %al, $PORT_CMOS_INDEX
+        inb $PORT_CMOS_DATA, %al
+
+        // enable a20
+        inb $PORT_A20, %al
+        orb $A20_ENABLE_BIT, %al
+        outb %al, $PORT_A20
+        movl %ecx, %eax
+transition32_nmi_off:
+        // Set segment descriptors
+        lidtw %cs:pmode_IDT_info
+        lgdtw %cs:rombios32_gdt_48
+
+        // Enable protected mode
+        movl %cr0, %ecx
+        andl $~(CR0_PG|CR0_CD|CR0_NW), %ecx
+        orl $CR0_PE, %ecx
+        movl %ecx, %cr0
+
+        // start 32bit protected mode code
+        ljmpl $SEG32_MODE32_CS, $(BUILD_BIOS_ADDR + 1f)
+
+        .code32
+        // init data segments
+1:      movl $SEG32_MODE32_DS, %ecx
+        movw %cx, %ds
+        movw %cx, %es
+        movw %cx, %ss
+        movw %cx, %fs
+        movw %cx, %gs
+
+        jmpl *%edx
+```
+
+As we mentioned before, edx contains the address of the C function, this jmpl code transfer control to C function.
+
+After transition to protected mode, we can execute C function cfunc32flat_handle_post, but the [Document](https://www.seabios.org/Execution_and_code_flow#SeaBIOS_code_phases) says, it's handle_post() in post.c, I don't know why.
 
 handle_post in post.c
 ```
@@ -269,7 +357,7 @@ startBoot(void)
 }
 ```
 
-which call bootloader, see https://stackoverflow.com/questions/15627668/why-does-the-bios-int-0x19-load-bootloader-at-0x7c00.
+which call bootloader, see [this](https://stackoverflow.com/questions/15627668/why-does-the-bios-int-0x19-load-bootloader-at-0x7c00.).
 
 If we use qemu(qemu-system-i386 -kernel arch/x86/boot/bzImage -initrd ramdisk.img -append "console=ttyS0" -m 100 -S -s) to start the linux kernel, it will be [seabios](https://github.com/coreboot/seabios.git), for debugging seabios see [this page](https://www.yuque.com/coolder/linux/rwh45c).
 ---
