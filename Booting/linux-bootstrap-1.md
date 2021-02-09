@@ -85,6 +85,12 @@ _start:
     ...
 ```
 ---
+Comments by coolder, 2021.02.09.
+
+This is about BIOS, before read it's hightly recommend to read [this page](https://www.cnblogs.com/gnuemacs/p/14287120.html).
+
+If we use qemu(qemu-system-i386 -kernel arch/x86/boot/bzImage -initrd ramdisk.img -append "console=ttyS0" -m 100 -S -s) to debug the linux kernel, it will be [seabios](https://github.com/coreboot/seabios.git), for debugging seabios see [this page](https://www.yuque.com/coolder/linux/rwh45c).
+
 This is my case, I'm using qemu, the BIOS is [seabios](https://www.seabios.org/SeaBIOS) (what's the relationship between seabios and coreboot?).
 
 We clone seabios' repo and make it. We fill find this,
@@ -358,8 +364,6 @@ startBoot(void)
 ```
 
 which call bootloader, see [this](https://stackoverflow.com/questions/15627668/why-does-the-bios-int-0x19-load-bootloader-at-0x7c00.).
-
-If we use qemu(qemu-system-i386 -kernel arch/x86/boot/bzImage -initrd ramdisk.img -append "console=ttyS0" -m 100 -S -s) to start the linux kernel, it will be [seabios](https://github.com/coreboot/seabios.git), for debugging seabios see [this page](https://www.yuque.com/coolder/linux/rwh45c).
 ---
 
 Here we can see the `jmp` instruction [opcode](http://ref.x86asm.net/coder32.html#xE9), which is `0xe9`, and its destination address at `_start16bit - ( . + 2)`.
