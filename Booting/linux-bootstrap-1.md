@@ -110,21 +110,21 @@ _start:
 + which shows reset_vector is in src/romlayout.S the entry located at 0xffff0 that is 0xfffffff0, as we expected, where the first instruction that CPU executed.
 + 
 + Let's check out reset_vector,
-+ 
-+ ```
-+ ➜  seabios git:(ef88eea) ✗ cat src/romlayout.S | grep -A 10 reset_vector
-+         .global reset_vector
-+ reset_vector:
-+         ljmpw $SEG_BIOS, $entry_post
-+ 
-+         // 0xfff5 - BiosDate in misc.c
-+ 
-+         // 0xfffe - BiosModelId in misc.c
-+ 
-+         // 0xffff - BiosChecksum in misc.c
-+ 
-+         .end
-+ ```
+ 
+ ```
+ ➜  seabios git:(ef88eea) ✗ cat src/romlayout.S | grep -A 10 reset_vector
+         .global reset_vector
+ reset_vector:
+         ljmpw $SEG_BIOS, $entry_post
+ 
+         // 0xfff5 - BiosDate in misc.c
+ 
+         // 0xfffe - BiosModelId in misc.c
+ 
+         // 0xffff - BiosChecksum in misc.c
+ 
+         .end
+ ```
 + 
 + reset_vector just jump to entry_post, and other memory is hard coded to be some value which in misc.c,
 + 
