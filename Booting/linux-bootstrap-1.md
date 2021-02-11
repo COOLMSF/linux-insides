@@ -93,7 +93,7 @@ If we use qemu(qemu-system-i386 -kernel arch/x86/boot/bzImage -initrd ramdisk.im
 
 This is my case, I'm using qemu, the BIOS is [seabios](https://www.seabios.org/SeaBIOS) (what's the relationship between seabios and coreboot?).
 
-We clone seabios' repo and make it. We fill find this,
+We clone seabios' repo and make it. As we know, reset_vector is the first instruction that CPU executes. Let's find it,
 
 ```
 ➜  seabios git:(ef88eea) ✗ grep "reset_vector" * -r
@@ -115,7 +115,12 @@ src/romlayout.S:reset_vector:
 
 which shows reset_vector is in src/romlayout.S, the entry is located at 0xffff0 that is 0xfffffff0, as we expected, where the first instruction that CPU executed.
 
-On emulators, this phase starts when the CPU starts execution in 16bit mode at 0xFFFF0000:FFF0. The emulators map the SeaBIOS binary to this address, and SeaBIOS arranges for romlayout.S:reset_vector() to be present there. This code calls romlayout.S:entry_post() which then calls post.c:handle_post() in 32bit mode.
+The [document](https://www.seabios.org/Execution_and_code_flow#SeaBIOS_code_phases) shows,
+
+```
+On emulators, this phase starts when the CPU starts execution in 16bit mode at 0xFFFF0000:FFF0. The emulators map the SeaBIOS binary to this address, 
+and SeaBIOS arranges for romlayout.S:reset_vector() to be present there. This code calls romlayout.S:entry_post() which then calls post.c:handle_post() in 32bit mode.
+```
 
 Let's check out reset_vector,
 
@@ -134,7 +139,7 @@ reset_vector:
         .end
 ```
  
-reset_vector just jump to entry_post, and other memory is hard coded to be some values which are in misc.c,
+which reset_vector just jump to entry_post, and other memory is hard coded to be some values which are in misc.c,
  
 ```
 // BIOS build date
@@ -144,8 +149,6 @@ u8 BiosModelId VARFSEGFIXED(0xfffe) = BUILD_MODEL_ID;
 
 u8 BiosChecksum VARFSEGFIXED(0xffff);
 ```
-
-Biosdate is different here, maybe this is because version is not matching.
 
 To verify this, just print hex value in gdb which connected to qemu, [how to use qemu to debug kernel](http://nickdesaulniers.github.io/blog/2018/10/24/booting-a-custom-linux-kernel-in-qemu-and-debugging-it-with-gdb/),
 
@@ -168,6 +171,8 @@ To verify this, just print hex value in gdb which connected to qemu, [how to use
 >>> 
 ```
 
+Some value (Biosdate) is different here, maybe this is because version is not matching.
+
 Let's check entry_post in romlayout.S,
 
 ```
@@ -183,7 +188,7 @@ We can see, entry_post check whether ever run POST, if so, no need to run post a
         ENTRY_INTO32 _cfunc32flat_handle_post   // Normal entry point
 ```
 
-where ENTRY_INTO32 is a macro, let's find it,
+where ENTRY_INTO32 is a macro. Let's find it,
 
 ```
 ➜  src git:(ef88eea) ✗ grep "ENTRY_INTO32" -r *
@@ -194,7 +199,7 @@ romlayout.S:        ENTRY_INTO32 _cfunc32flat_handle_18
 romlayout.S:        ENTRY_INTO32 _cfunc32flat_handle_post   // Normal entry point
 ```
 
-grep shows it's in entryfuncs.S, defined as a macro followed by a C function, let's have a look,
+grep shows it's in entryfuncs.S, defined as a macro followed by a C function. Let's have a look,
 
 ```
         // Reset stack, transition to 32bit mode, and call a C function.
@@ -207,7 +212,7 @@ grep shows it's in entryfuncs.S, defined as a macro followed by a C function, le
         .endm
 ```
 
-this function load the start address of the C function into edx and jump to transition32(romlayout.S),
+this macro load the start address of the C function into edx and jump to transition32(romlayout.S),
 
 ```
 transition32:
@@ -252,7 +257,7 @@ transition32_nmi_off:
         jmpl *%edx
 ```
 
-As we mentioned before, edx contains the address of the C function, this jmpl code transfer control to C function.
+As we mentioned before, edx contains the address of the C function, jmpl transfer control to C function.
 
 After transition to protected mode, we can execute C function cfunc32flat_handle_post, but the [Document](https://www.seabios.org/Execution_and_code_flow#SeaBIOS_code_phases) says, it's handle_post() in post.c, I don't know why.
 
@@ -363,7 +368,9 @@ startBoot(void)
 }
 ```
 
-which transfer control to MBR, see [this](https://stackoverflow.com/questions/15627668/why-does-the-bios-int-0x19-load-bootloader-at-0x7c00.).
+The INT 0x19 handler reads 512 bytes from the first sector of boot device into the memory at address 0x7c00. 
+
+which transfer control to MBR(contains boot loader), see [this](https://stackoverflow.com/questions/15627668/why-does-the-bios-int-0x19-load-bootloader-at-0x7c00.).
 
 Commonly, Linux is booted from a hard disk, where the Master Boot Record (MBR) contains the primary boot loader(which loads the Linux kernel). The MBR is a 512-byte sector, located in the first sector on the disk (sector 1 of cylinder 0, head 0). 
 After the MBR is loaded into RAM, the BIOS yields control to it.
@@ -374,23 +381,20 @@ You must read [this article](https://developer.ibm.com/technologies/linux/articl
 
 As we mentioned above, BIOS gives control to MBR
 
-## Stage 1
+### Stage 1
 
 The primary boot loader that resides in the MBR is a 512-byte image containing both program code and a small partition table (see Figure 2). The first 446 bytes are the primary boot loader, which contains both executable code and error message text. 
 The next sixty-four bytes are the partition table, which contains a record for each of four partitions (sixteen bytes each). The MBR ends with two bytes that are defined as the magic number (0xAA55). The magic number serves as a validation check of the MBR.
 
-
 The job of the primary boot loader is to find and load the secondary boot loader (stage 2). It does this by looking through the partition table for an active partition. When it finds an active partition, it scans the remaining partitions in the table to ensure that they’re all inactive. 
 When this is verified, the active partition’s boot record is read from the device into RAM and executed.
 
-
-## Stage 2
+### Stage 2
 
 The secondary, or second-stage, boot loader could be more aptly called the kernel loader. The task at this stage is to load the Linux kernel and optional initial RAM disk.
 
 The first- and second-stage boot loaders combined are called Linux Loader (LILO) or GRand Unified Bootloader (GRUB) in the x86 PC environment. Because LILO has some disadvantages that were corrected in GRUB, let’s look into GRUB. 
 (See many additional resources on GRUB, LILO, and related topics in the [Resources](https://developer.ibm.com/technologies/linux/articles/l-linuxboot/#resources) section later in this article.
-
 
 The great thing about GRUB is that it includes knowledge of Linux file systems. Instead of using raw sectors on the disk, as LILO does, GRUB can load a Linux kernel from an ext2 or ext3 file system. It does this by making the two-stage boot loader into a three-stage boot loader. 
 Stage 1 (MBR) boots a stage 1.5 boot loader that understands the particular file system containing the Linux kernel image. Examples include reiserfs_stage1_5 (to load from a Reiser journaling file system) or e2fs_stage1_5 (to load from an ext2 or ext3 file system). 
@@ -401,19 +405,19 @@ Optionally, you can use a command-line shell for greater manual control over the
 
 With the second-stage boot loader in memory, the file system is consulted, and the default kernel image and initrd image are loaded into memory. With the images ready, the stage 2 boot loader invokes the kernel image.
 
-## Kernel
+### Kernel
 
 With the kernel image in memory and control given from the stage 2 boot loader, the kernel stage begins. The kernel image isn’t so much an executable kernel, but a compressed kernel image. 
 Typically this is a zImage (compressed image, less than 512KB) or a bzImage (big compressed image, greater than 512KB), that has been previously compressed with zlib. At the head of this kernel image is a routine (Note here) that does some minimal amount of hardware setup 
 and then decompresses the kernel contained within the kernel image and places it into high memory. If an initial RAM disk image is present, this routine moves it into memory and notes it for later use. The routine then calls the kernel and the kernel boot begins.
 
-When the bzImage (for an i386 image) is invoked, you begin at ./arch/i386/boot/head.S in the start assembly routine (see Figure 3 for the major flow). This routine does some basic hardware setup and invokes the startup_32 routine in ./arch/i386/boot/compressed/head.S. 
+When the bzImage (for an i386 image) is invoked, you begin at ./arch/i386/boot/head.S (this is MBR, you can use dd if=bzImage bs=1 count=512 > mbr to get mbr, and use objdump -D -b binary -mi386 -Maddr16,data16 mbr to dump mbr) in the start assembly routine (see Figure 3 for the major flow). 
+This routine does some basic hardware setup and invokes the startup_32 routine in ./arch/i386/boot/compressed/head.S. 
 This routine sets up a basic environment (stack, etc.) and clears the Block Started by Symbol (BSS). The kernel is then decompressed through a call to a C function called decompress_kernel (located in ./arch/i386/boot/compressed/misc.c). 
 When the kernel is decompressed into memory, it is called. This is yet another startup_32 function, but this function is in ./arch/i386/kernel/head.S.
 
 In the new startup_32 function (also called the swapper or process 0), the page tables are initialized and memory paging is enabled. The type of CPU is detected along with any optional floating-point unit (FPU) and stored away for later use. 
 The start_kernel function is then invoked (init/main.c), which takes you to the non-architecture specific Linux kernel. This is, in essence, the main function for the Linux kernel.
-
 
 With the call to start_kernel, a long list of initialization functions are called to set up interrupts, perform further memory configuration, and load the initial RAM disk. In the end, a call is made to kernel_thread (in arch/i386/kernel/process.c) to start the init function,
 which is the first user-space process. Finally, the idle task is started and the scheduler can now take control (after the call to cpu_idle). With interrupts enabled, the pre-emptive scheduler periodically takes control to provide multitasking.
@@ -426,7 +430,7 @@ The initrd function allows you to create a small Linux kernel with drivers compi
 Because the root file system is a file system on a disk, the initrd function provides a means of bootstrapping to gain access to the disk and mount the real root file system. In an embedded target without a hard disk, the initrd can be the final root file system, 
 or the final root file system can be mounted via the Network File System (NFS).
 
-## Init
+### Init
 
 After the kernel is booted and initialized, the kernel starts the first user-space application. This is the first program invoked that is compiled with the standard C library. Prior to this point in the process, no standard C applications have been executed.
 
