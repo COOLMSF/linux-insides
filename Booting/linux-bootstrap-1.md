@@ -87,7 +87,7 @@ _start:
 ---
 Comments by coolder, 2021.02.09.
 
-This is about BIOS, before read it's hightly recommend to read [this page](https://www.cnblogs.com/gnuemacs/p/14287120.html).
+## This is about BIOS, before read it's hightly recommend to read [this page](https://www.cnblogs.com/gnuemacs/p/14287120.html).
 
 If we use qemu(qemu-system-i386 -kernel arch/x86/boot/bzImage -initrd ramdisk.img -append "console=ttyS0" -m 100 -S -s) to debug the linux kernel, it will be [seabios](https://github.com/coreboot/seabios.git), for debugging seabios see [this page](https://www.yuque.com/coolder/linux/rwh45c).
 
@@ -363,7 +363,76 @@ startBoot(void)
 }
 ```
 
-which call bootloader, see [this](https://stackoverflow.com/questions/15627668/why-does-the-bios-int-0x19-load-bootloader-at-0x7c00.).
+which transfer control to MBR, see [this](https://stackoverflow.com/questions/15627668/why-does-the-bios-int-0x19-load-bootloader-at-0x7c00.).
+
+Commonly, Linux is booted from a hard disk, where the Master Boot Record (MBR) contains the primary boot loader(which loads the Linux kernel). The MBR is a 512-byte sector, located in the first sector on the disk (sector 1 of cylinder 0, head 0). 
+After the MBR is loaded into RAM, the BIOS yields control to it.
+
+## This is the boot loader part
+
+You must read [this article](https://developer.ibm.com/technologies/linux/articles/l-linuxboot/) before you continue.
+
+As we mentioned above, BIOS gives control to MBR
+
+## Stage 1
+
+The primary boot loader that resides in the MBR is a 512-byte image containing both program code and a small partition table (see Figure 2). The first 446 bytes are the primary boot loader, which contains both executable code and error message text. 
+The next sixty-four bytes are the partition table, which contains a record for each of four partitions (sixteen bytes each). The MBR ends with two bytes that are defined as the magic number (0xAA55). The magic number serves as a validation check of the MBR.
+
+
+The job of the primary boot loader is to find and load the secondary boot loader (stage 2). It does this by looking through the partition table for an active partition. When it finds an active partition, it scans the remaining partitions in the table to ensure that they’re all inactive. 
+When this is verified, the active partition’s boot record is read from the device into RAM and executed.
+
+
+## Stage 2
+
+The secondary, or second-stage, boot loader could be more aptly called the kernel loader. The task at this stage is to load the Linux kernel and optional initial RAM disk.
+
+The first- and second-stage boot loaders combined are called Linux Loader (LILO) or GRand Unified Bootloader (GRUB) in the x86 PC environment. Because LILO has some disadvantages that were corrected in GRUB, let’s look into GRUB. 
+(See many additional resources on GRUB, LILO, and related topics in the [Resources](https://developer.ibm.com/technologies/linux/articles/l-linuxboot/#resources) section later in this article.
+
+
+The great thing about GRUB is that it includes knowledge of Linux file systems. Instead of using raw sectors on the disk, as LILO does, GRUB can load a Linux kernel from an ext2 or ext3 file system. It does this by making the two-stage boot loader into a three-stage boot loader. 
+Stage 1 (MBR) boots a stage 1.5 boot loader that understands the particular file system containing the Linux kernel image. Examples include reiserfs_stage1_5 (to load from a Reiser journaling file system) or e2fs_stage1_5 (to load from an ext2 or ext3 file system). 
+When the stage 1.5 boot loader is loaded and running, the stage 2 boot loader can be loaded.
+
+With stage 2 loaded, GRUB can, upon request, display a list of available kernels (defined in /etc/grub.conf, with soft links from /etc/grub/menu.lst and /etc/grub.conf). You can select a kernel and even amend it with additional kernel parameters. 
+Optionally, you can use a command-line shell for greater manual control over the boot process.
+
+With the second-stage boot loader in memory, the file system is consulted, and the default kernel image and initrd image are loaded into memory. With the images ready, the stage 2 boot loader invokes the kernel image.
+
+## Kernel
+
+With the kernel image in memory and control given from the stage 2 boot loader, the kernel stage begins. The kernel image isn’t so much an executable kernel, but a compressed kernel image. 
+Typically this is a zImage (compressed image, less than 512KB) or a bzImage (big compressed image, greater than 512KB), that has been previously compressed with zlib. At the head of this kernel image is a routine (Note here) that does some minimal amount of hardware setup 
+and then decompresses the kernel contained within the kernel image and places it into high memory. If an initial RAM disk image is present, this routine moves it into memory and notes it for later use. The routine then calls the kernel and the kernel boot begins.
+
+When the bzImage (for an i386 image) is invoked, you begin at ./arch/i386/boot/head.S in the start assembly routine (see Figure 3 for the major flow). This routine does some basic hardware setup and invokes the startup_32 routine in ./arch/i386/boot/compressed/head.S. 
+This routine sets up a basic environment (stack, etc.) and clears the Block Started by Symbol (BSS). The kernel is then decompressed through a call to a C function called decompress_kernel (located in ./arch/i386/boot/compressed/misc.c). 
+When the kernel is decompressed into memory, it is called. This is yet another startup_32 function, but this function is in ./arch/i386/kernel/head.S.
+
+In the new startup_32 function (also called the swapper or process 0), the page tables are initialized and memory paging is enabled. The type of CPU is detected along with any optional floating-point unit (FPU) and stored away for later use. 
+The start_kernel function is then invoked (init/main.c), which takes you to the non-architecture specific Linux kernel. This is, in essence, the main function for the Linux kernel.
+
+
+With the call to start_kernel, a long list of initialization functions are called to set up interrupts, perform further memory configuration, and load the initial RAM disk. In the end, a call is made to kernel_thread (in arch/i386/kernel/process.c) to start the init function,
+which is the first user-space process. Finally, the idle task is started and the scheduler can now take control (after the call to cpu_idle). With interrupts enabled, the pre-emptive scheduler periodically takes control to provide multitasking.
+
+During the boot of the kernel, the initial-RAM disk (initrd) that was loaded into memory by the stage 2 boot loader is copied into RAM and mounted. This initrd serves as a temporary root file system in RAM and allows the kernel to fully boot without having to mount any physical disks. 
+Since the necessary modules needed to interface with peripherals can be part of the initrd, the kernel can be very small, but still support a large number of possible hardware configurations. 
+After the kernel is booted, the root file system is pivoted (via pivot_root) where the initrd root file system is unmounted and the real root file system is mounted.
+
+The initrd function allows you to create a small Linux kernel with drivers compiled as loadable modules. These loadable modules give the kernel the means to access disks and the file systems on those disks, as well as drivers for other hardware assets. 
+Because the root file system is a file system on a disk, the initrd function provides a means of bootstrapping to gain access to the disk and mount the real root file system. In an embedded target without a hard disk, the initrd can be the final root file system, 
+or the final root file system can be mounted via the Network File System (NFS).
+
+## Init
+
+After the kernel is booted and initialized, the kernel starts the first user-space application. This is the first program invoked that is compiled with the standard C library. Prior to this point in the process, no standard C applications have been executed.
+
+In a desktop Linux system, the first application started is commonly /sbin/init. But it need not be. Rarely do embedded systems require the extensive initialization provided by init (as configured through /etc/inittab). 
+In many cases, you can invoke a simple shell script that starts the necessary embedded applications.
+
 ---
 
 Here we can see the `jmp` instruction [opcode](http://ref.x86asm.net/coder32.html#xE9), which is `0xe9`, and its destination address at `_start16bit - ( . + 2)`.
